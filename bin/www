@@ -1,0 +1,139 @@
+// bin/www
+'use strict';
+
+// Carga variables de entorno desde .env ANTES de importar app y controladores
+require('dotenv').config();
+
+const app = require('../app');
+const debug = require('debug')('turisur:server');
+const http = require('http');
+const { Server } = require('socket.io');
+const fs = require('fs');
+const path = require('path');
+const createError = require('http-errors');
+
+// Puerto del servicio
+const port = normalizePort(process.env.PORT || '3001');
+app.set('port', port);
+
+// Instancia del servidor HTTP nativo
+const server = http.createServer(app);
+
+// Configuracion de Socket.IO con politicas de acceso cruzado (CORS)
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  },
+});
+
+app.set('socketio', io);
+
+// Almacenamiento en memoria para baja latencia (telemetria activa y conexiones)
+global.user_socket_connect_list = {};
+global.car_locations_global = {};
+
+// Control de flujo de trafico para tareas ETL
+global.iotTrafficState = {
+  firstSeenAt: null,
+  lastSeenAt: null,
+};
+
+// Carga dinamica y desacoplada de controladores mediante inyeccion de dependencias
+console.log('[Servidor] Cargando controladores...');
+
+const controllersPath = path.join(__dirname, '../controllers');
+
+if (fs.existsSync(controllersPath)) {
+  fs.readdirSync(controllersPath).forEach((file) => {
+    if (!file.endsWith('.js')) return;
+
+    try {
+      const controller = require(path.join(controllersPath, file));
+
+      if (typeof controller.controller === 'function') {
+        controller.controller(
+          app,
+          io,
+          global.user_socket_connect_list,
+          global.car_locations_global
+        );
+        console.log(`[Servidor] Controlador inicializado: ${file}`);
+      } else {
+        console.warn(`[Servidor] ${file} no exporta la funcion controller`);
+      }
+    } catch (err) {
+      console.error(`[Servidor] Error al cargar ${file}:`, err.message);
+    }
+  });
+}
+
+// Proceso en segundo plano: exportacion periodica de posiciones a almacenamiento en la nube
+const exportBusPositions = require('../jobs/export_bus_positions');
+
+setInterval(() => {
+  exportBusPositions().catch((err) => {
+    console.error('[ETL] Error en proceso de exportacion:', err.message);
+  });
+}, 60 * 1000);
+
+console.log('[ETL] Job de persistencia inicializado (frecuencia: 60s)');
+
+// Manejo de recursos no encontrados (404)
+app.use((req, res, next) => {
+  if (!res.headersSent) next(createError(404));
+});
+
+// Manejador centralizado de excepciones
+app.use((err, req, res, next) => {
+  const isDev = req.app.get('env') === 'development';
+  res.status(err.status || 500).json({
+    error: true,
+    message: isDev ? err.message : 'Error interno del servidor',
+  });
+});
+
+// Inicializacion del listener de red
+server.listen(port, '0.0.0.0');
+server.on('error', onError);
+server.on('listening', onListening);
+
+// Normalizacion del puerto asignado por el entorno
+function normalizePort(val) {
+  const parsedPort = parseInt(val, 10);
+  if (isNaN(parsedPort)) return val;
+  if (parsedPort >= 0) return parsedPort;
+  return false;
+}
+
+// Control defensivo ante errores de enlace de socket o permisos
+function onError(error) {
+  if (error.syscall !== 'listen') throw error;
+
+  const bind = typeof port === 'string' ? 'Pipe ' + port : 'Puerto ' + port;
+
+  switch (error.code) {
+    case 'EACCES':
+      console.error(`${bind} requiere privilegios de administrador.`);
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(`${bind} ya se encuentra en uso por otro proceso.`);
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+// Confirmacion de inicializacion y detalle de endpoints de telemetria
+function onListening() {
+  const addr = server.address();
+  const bind = typeof addr === 'string' ? addr : addr.port;
+
+  debug('Escuchando en ' + bind);
+  console.log(`[Servidor] Servicio de telemetria activo en puerto ${bind}`);
+  console.log(`[Servidor] Endpoint flota: GET /api/all_car_locations`);
+  console.log(`[Servidor] Endpoint IoT: POST /api/iot/bus-position`);
+}

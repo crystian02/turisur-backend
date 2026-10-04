@@ -1,0 +1,21 @@
+<!-- views/error.ejs -->
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Error - <%= message %></title>
+    <link rel="stylesheet" href="/stylesheets/style.css" />
+  </head>
+  <body>
+    <h1><%= message %></h1>
+    <% if (error && error.status) { %>
+      <h2>Estado: <%= error.status %></h2>
+    <% } %>
+    
+    <!-- Muestra detalles tecnicos solo en entorno de desarrollo -->
+    <% if (error && error.stack && process.env.NODE_ENV !== 'production') { %>
+      <pre><%= error.stack %></pre>
+    <% } %>
+  </body>
+</html>
